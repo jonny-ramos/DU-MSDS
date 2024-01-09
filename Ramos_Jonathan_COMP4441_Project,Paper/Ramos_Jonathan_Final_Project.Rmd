@@ -1,0 +1,567 @@
+---
+title: "COMP 4441 Final Project"
+subtitle: "Exploratory Analyses, Parametric Statistics, and Classifiers"
+author: "Jonathan Ramos"
+output:
+  word_document: default
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(knitr)
+library(ggpubr)
+library(dplyr)
+library(gridExtra)
+library(grid)
+library(ggplot2)
+library(psych)
+library(broom)
+library(FSA)
+library(MASS)
+library(ggord)
+library(caret)
+library(randomForest)
+library(ROCR)
+```
+
+
+An Alzheimer's Disease (AD) diagnosis can only be confirmed through post-mortem analyses of neurofibrillary tangles and plaque deposits, and so it is necessary to identify alternative prospective biomarkers that can aid in the classification of patients as demented or non-demented. It has been shown that over time, due to the atrophies associated with the disease progression of AD, patients with AD have a lighter brain mass than patients without AD. Although we cannot measure this directy, we can estimate it through MRI. From images gathered via MRI, we can estimate the patient's whole brain volume by masking an image with a brain atlas and counting the percent of pixels that are labeled as either grey or white matter. 
+In this data set normalized whole brain volume (nWBV) as well as other potentially useful metrics were measured in 150 participants aged 60-96. participants were scanned 2 or more times with each visit separated by at least one year. Of the 150 participants, 72 were characterized as nondemented for the duration of the study, 64 were characterized as demented throughout the study and 14 were characterized as non-demented during the initial visit but were later characterized as demented at a later visit. 
+
+This Rmd file is split into three sections: 
+1. Exploratory Analyses
+2. Parametric Statistics
+3. Classifiers
+
+Quick overview of variables:
+
+* Subject.ID
+* MRI.ID
+* Group
+* Visit       visit number (at least 2 per subject)
+* MR.Delay    days between last visit (at least one year between visits)
+* M.F         male / female
+* Hand        handedness (all participants were right-hanted)
+* Age
+* EDUC        years of education
+* SES         Hollingshead Index of Social Position, ranging from 1 (highest) to 5 (lowest)
+* MMSE        Mini-mental state examination score, ranging from 0 (worst) to 30 (best)
+* CDR         Clinical Dementia Rating: 0 (none), 0.5 (very mild AD), 1 (mild AD), 2 (moderate AD)
+* eTIV        Estimate total intracrantial volume, mm3
+* nWBV        Normalized whole-brain volume as a percent of all voxels
+* ASF         Atlas scaling factor 
+
+
+# 1. Exploratory Analyses
+
+```{r}
+dat <- read.csv('oasis_longitudinal.csv')
+dat.dem <- dat[dat$Group == 'Demented' & dat$Visit == 1,]
+dat.ndem <- dat[dat$Group == 'Nondemented' & dat$Visit == 1,]
+dat.conv <- dat[dat$Group == 'Converted' & dat$Visit == 1,]
+```
+
+Let's just make some plots
+
+```{r, echo=FALSE}
+g1 <- ggqqplot(dat.dem, x = 'eTIV') + ggtitle('eTIV demented')
+g2 <- ggplot(dat.dem, aes(x=eTIV)) + geom_histogram() + ggtitle('eTIV demented')
+g3 <- ggqqplot(dat.ndem, x = 'eTIV')+ ggtitle('eTIV nondemented')
+g4 <- ggplot(dat.ndem, aes(x=eTIV)) + geom_histogram() + ggtitle('eTIV nondemented')
+grid.arrange(g1, g3, g2, g4)
+```
+
+
+```{r, echo=FALSE}
+g1 <- ggqqplot(dat.dem, x = 'nWBV') + ggtitle('nWBV demented')
+g2 <- ggplot(dat.dem, aes(x=nWBV)) + geom_histogram() + ggtitle('nWBV demented')
+g3 <- ggqqplot(dat.ndem, x = 'nWBV')+ ggtitle('nWBV nondemented')
+g4 <- ggplot(dat.ndem, aes(x=nWBV)) + geom_histogram() + ggtitle('nWBV nondemented')
+grid.arrange(g1, g3, g2, g4)
+```
+
+
+
+
+```{r, echo=FALSE}
+g1 <- ggqqplot(dat.dem, x = 'ASF') + ggtitle('ASF demented')
+g2 <- ggplot(dat.dem, aes(x=ASF)) + geom_histogram() + ggtitle('ASF demented')
+g3 <- ggqqplot(dat.ndem, x = 'ASF')+ ggtitle('ASF nondemented')
+g4 <- ggplot(dat.ndem, aes(x=ASF)) + geom_histogram() + ggtitle('ASF nondemented')
+grid.arrange(g1, g3, g2, g4)
+```
+
+Ok great now let's just make a pair plot to get a sense for whether any of our more interesting variables are correlated or not.
+
+```{r, fig.height=6, fig.width=6}
+# dat.init contains only data from the first visit of all participants
+# I chose to only analyze the beginning of the set because some patients visit more than others and maybe over represented in the set if I take all timepoints from all patients.
+
+dat.init <- dat[dat$Visit == 1,]
+pairs.panels(dat.init[c('Age','EDUC','SES','CDR','MMSE','eTIV', 'nWBV','ASF')], pch=21,
+             bg=c('red','green','blue')[factor(dat.init$Group)], gap=0)
+
+# red is converted (from non demented at init, to demented at a subsequent visit)
+# green is demented
+# blue is nondemented
+
+```
+
+Since the label 'Demented' or 'Nondemented' is generated directly from CDR we will further examine CDR. A demented individual is anyone whose CDR is greater than 0, 0 being characterized as having no dementia, 0.5 very mild dementia, 1.0 mild dementia and 2.0 moderate dementia.
+
+Let's see if CDR varies with any of our demographic variables:
+
+```{r, fig.width=6}
+dat.init$CDR.factor <- as.factor(dat.init$CDR)
+v1 <- ggplot(dat.init[dat.init$M.F == 'M',], aes(x=CDR.factor, y=Age, fill=CDR.factor)) + 
+  geom_violin(alpha=0.1) +
+  geom_jitter(shape=21, position=position_jitter(0.15), aes(col=CDR.factor)) +
+  ylim(60,96) +
+  ggtitle('Age distribution by CDR, M')
+
+v2 <- ggplot(dat.init[dat.init$M.F == 'F',], aes(x=CDR.factor, y=Age, fill=CDR.factor)) + 
+  geom_violin(alpha=0.1) +
+  geom_jitter(shape=21, position=position_jitter(0.15), aes(col=CDR.factor)) +
+  ylim(60,96) +
+  ggtitle('Age distribution by CDR, F')
+
+v3 <- ggplot(dat.init, aes(x=CDR.factor, y=EDUC, fill=CDR.factor)) + geom_violin(alpha=0.1) +
+  geom_jitter(shape=21, position=position_jitter(0.15), aes(col=CDR.factor)) +
+  ggtitle('EDUC distribution by CDR')
+
+v4 <- ggplot(dat.init, aes(x=CDR.factor, y=SES, fill=CDR.factor)) + geom_violin(alpha=0.1) +
+  geom_jitter(shape=21, position=position_jitter(0.15), aes(col=CDR.factor)) +
+  ggtitle('SES distribution by CDR')
+
+v5 <- ggplot(dat.init, aes(x=CDR.factor, y=MMSE, fill=CDR.factor)) + geom_violin(alpha=0.1) +
+  geom_jitter(shape=21, position=position_jitter(0.15), aes(col=CDR.factor)) +
+  ggtitle('MMSE distribution by CDR')
+
+v6 <- ggplot(dat.init, aes(x=CDR.factor, y=eTIV, fill=CDR.factor)) + geom_violin(alpha=0.1) +
+  geom_jitter(shape=21, position=position_jitter(0.15), aes(col=CDR.factor)) +
+  ggtitle('eTIV distribution by CDR')
+
+v7 <- ggplot(dat.init, aes(x=CDR.factor, y=nWBV, fill=CDR.factor)) + geom_violin(alpha=0.1) +
+  geom_jitter(shape=21, position=position_jitter(0.15), aes(col=CDR.factor)) +
+  ggtitle('nWBV distribution by CDR')
+
+v8 <- ggplot(dat.init, aes(x=CDR.factor, y=ASF, fill=CDR.factor)) + geom_violin(alpha=0.1) +
+  geom_jitter(shape=21, position=position_jitter(0.15), aes(col=CDR.factor)) +
+  ggtitle('ASF distribution by CDR')
+  
+grid.arrange(v1, v2, ncol=2)
+grid.arrange(v3, v4, ncol=2)
+grid.arrange(v5, v6, ncol=2)
+grid.arrange(v7, v8, ncol=2)
+
+```
+
+
+Patients belonging to the Demented group went through the study with a CDR of at least 0.5 for all visits whereas patients belonging to the Nondemented group went through with a CDR of 0 for all visits. Lastly, a third group arose called Converted where a patient began the study with a CDR of 0 but recieved a CDR of at least 0.5 at a later subsequent visit. Because of the way these labels are defined, there is an alternative way to try and understand the distributions above: we can group by the labels in the Group column rather than by CDR. Let's repeat the visualizations above but instead grouping by Group. 
+
+```{r, fig.width=6}
+dat.init$CDR.factor <- as.factor(dat.init$CDR)
+v1 <- ggplot(dat.init[dat.init$M.F == 'M',], aes(x=Group, y=Age, fill=Group)) + 
+  geom_violin(alpha=0.1) +
+  geom_jitter(shape=21, position=position_jitter(0.15), aes(col=Group)) +
+  ylim(60,96) +
+  ggtitle('Age distribution by Group, M')
+
+v2 <- ggplot(dat.init[dat.init$M.F == 'F',], aes(x=Group, y=Age, fill=Group)) + 
+  geom_violin(alpha=0.1) +
+  geom_jitter(shape=21, position=position_jitter(0.15), aes(col=Group)) +
+  ylim(60,96) +
+  ggtitle('Age distribution by Group, F')
+
+v3 <- ggplot(dat.init, aes(x=Group, y=EDUC, fill=Group)) + geom_violin(alpha=0.1) +
+  geom_jitter(shape=21, position=position_jitter(0.15), aes(col=Group)) +
+  ggtitle('EDUC distribution by Group')
+
+v4 <- ggplot(dat.init, aes(x=Group, y=SES, fill=Group)) + geom_violin(alpha=0.1) +
+  geom_jitter(shape=21, position=position_jitter(0.15), aes(col=Group)) +
+  ggtitle('SES distribution by Group')
+
+v5 <- ggplot(dat.init, aes(x=Group, y=MMSE, fill=Group)) + geom_violin(alpha=0.1) +
+  geom_jitter(shape=21, position=position_jitter(0.15), aes(col=Group)) +
+  ggtitle('MMSE distribution by Group')
+
+v6 <- ggplot(dat.init, aes(x=Group, y=eTIV, fill=Group)) + geom_violin(alpha=0.1) +
+  geom_jitter(shape=21, position=position_jitter(0.15), aes(col=Group)) +
+  ggtitle('eTIV distribution by Group')
+
+v7 <- ggplot(dat.init, aes(x=Group, y=nWBV, fill=Group)) + geom_violin(alpha=0.1) +
+  geom_jitter(shape=21, position=position_jitter(0.15), aes(col=Group)) +
+  ggtitle('nWBV distribution by Group')
+
+v8 <- ggplot(dat.init, aes(x=Group, y=ASF, fill=Group)) + geom_violin(alpha=0.1) +
+  geom_jitter(shape=21, position=position_jitter(0.15), aes(col=Group)) +
+  ggtitle('ASF distribution by Group')
+  
+grid.arrange(v1, v2, ncol=2)
+grid.arrange(v3, v4, ncol=2)
+grid.arrange(v5, v6, ncol=2)
+grid.arrange(v7, v8, ncol=2)
+
+```
+
+From the ggqqplots, histograms, and violin plots above, we can see that the data suggests that normalized whole brain volume might be different in Demented vs Non-demented participants Because the data are normally distributed, it is appropriate to run a t-test to test if the center of the distributions for nWBV for demented vs non demented are different for participants who maintained the same demented status throughout the duration of the study. From the t-test below, if we set alpha=0.05, we may reject the null hypothesis that the means nWBV for demented and non-demented participants are not different. We can therefore conclude that demented participants have a slightly lower mean nWBV than non-demented patients.
+
+
+# 2. Parametric Statistics
+
+Do patient's with different CDR have different nWBV?
+
+```{r}
+g1 <- ggqqplot(dat.init[dat.init$CDR == 0, 'nWBV']) + ggtitle('qqplot of nWBV, CDR == 0')
+g2 <- ggqqplot(dat.init[dat.init$CDR == 0.5, 'nWBV']) + ggtitle('qqplot of nWBV, CDR == 0.5')
+g3 <- ggqqplot(dat.init[dat.init$CDR == 1, 'nWBV']) + ggtitle('qqplot of nWBV, CDR == 1')
+grid.arrange(g1, g2, g3, ncol=2)
+
+shapiro.test(dat.init[dat.init$CDR == 0, 'nWBV'])
+shapiro.test(dat.init[dat.init$CDR == 0.5, 'nWBV'])
+shapiro.test(dat.init[dat.init$CDR == 1, 'nWBV'])
+```
+Great, based off of the qqplots and shapiro wilk tests for normality, it is appropriate to consider these groups as coming from a normal distribution. We can therefore perform an ANOVA to compare 3 ways if the means are different. From the violin plots above we can see that the variances are not all equal.
+
+```{r}
+oneway.test(nWBV ~ CDR.factor,
+            data=dat.init,
+            var.equal = FALSE)
+```
+From the one way ANOVA above, if we set alpha=0.05, we reject that null hypothesis that the means are all equal. We may now conclude that at least one of the means for nWBV is different across CDR. Now we should run some post hoc t-tests to see which CDR.factor groups are different from each other for nWBV. Since we are making 3 comparisons, to account for the likelihood of false positives during multiple testing, we will use the Bonferroni corrected p value which is 0.5 / 3 = 0.0167. As we can see from the t-tests below, all p-values are less than the Bonferroni corrected p of 0.0167 so we can therefore conclude that all CDR groups are different from each other in terms of nWBV. 
+
+```{r, fig.width=4, fig.height=4}
+dat.init$CDR <- as.factor(dat.init$CDR)
+ggplot(dat.init, aes(x=CDR, y=nWBV, fill=CDR)) +
+  geom_boxplot(alpha=0.2) +
+  ggtitle("Normalized Whole Brain Volume by CDR")
+
+print(0.05/3)
+t.test(dat.init[dat.init$CDR == 0, 'nWBV'],dat.init[dat.init$CDR == 0.5, 'nWBV'])
+t.test(dat.init[dat.init$CDR == 0.5, 'nWBV'],dat.init[dat.init$CDR == 1, 'nWBV'])
+t.test(dat.init[dat.init$CDR == 1, 'nWBV'],dat.init[dat.init$CDR == 0, 'nWBV'])
+```
+
+During our exploratory analyses above, the pair plot suggested that nWBV may be corrolated with Age.
+
+```{r, fig.width=6, fig.height=4}
+nWBV.Age.lm <- lm(nWBV ~ Age, data = dat.init)
+m <- nWBV.Age.lm$coefficients[2]
+b <- nWBV.Age.lm$coefficients[1]
+
+ggplot(dat.init, aes(x=Age, y=nWBV, color=CDR)) +
+  geom_point() +
+  geom_abline(slope = m, intercept = b) +
+  ggtitle("Noramlized Whole Brain Volume by Age")
+  
+summary(nWBV.Age.lm)
+cor.test(dat.init$nWBV, dat.init$Age, method="pearson")
+```
+
+
+Do participants in the demented group experience a greater loss in nWBV than nondemented participants? Since this was a longitudinal study we can assess the unique rate of atrophy for each patient and then compare across groups. It seems straightforward to take the difference between the first and last visit and compare distributions of differences; however some participants visited more than others and the number of days between visits is not consistent. This means that differences in the difference between the first and last visit may just be a result of the difference in time between the first and last visit. To account for this I will fit a line to each patient for nWBV and compare the slopes of these lines. This means that we can estimate the rate of atrophy with the slope of the linear regression line for each patient. 
+
+```{r, fig.width=6, fig.height=4}
+dat.lm <- as.data.frame(dat %>% group_by(Subject.ID) %>% do(tidy(lm(nWBV ~ MR.Delay, dat=.))))
+dat.slopes <- dat.lm[dat.lm$term == 'MR.Delay',]
+
+# let's just run a quick test on 1 participant to confirm that we got what we expect
+
+# using lm to get estimate slope the usual way, 
+df.test <- dat[dat$Subject.ID == 'OAS2_0048',]
+coef <- lm(nWBV ~ MR.Delay, data = df.test)$coefficients
+ggplot(data = df.test,aes(x=MR.Delay, y=nWBV)) +
+  geom_point() +
+  geom_abline(slope = coef[2], intercept = coef[1]) +
+  ggtitle("Estimated Atrophy Rate for participant OAS2_0048")
+
+# we expect true if both methods yield the same result
+(coef[2] == dat.slopes[dat.slopes$Subject.ID == 'OAS2_00048',]$estimate)
+
+# now let's just add in a column of grpi[ labels to our slope data frame
+dat.group <- distinct(dat[,c('Subject.ID','Group')])
+dat.slopes <- merge(dat.slopes, dat.group, by='Subject.ID')
+dat.slopes$estimate <- dat.slopes$estimate *365
+
+# splitting up slopes by group
+# Demented means that CDR remained at least 0.5 for the duration of the study
+# Nondemented means that CDR remained 0 for the duration of the study (no AD)
+# Converted means that CDR was 0 initially then increased to at least 0.5 by the end of the study.
+
+slope.dem <- dat.slopes[dat.slopes$Group == 'Demented',]   
+slope.ndem <- dat.slopes[dat.slopes$Group == 'Nondemented',]
+slope.conv <- dat.slopes[dat.slopes$Group == 'Converted',]
+
+```
+
+
+Now I just want to check if the slopes for atrophy rate are normally distributed. From the qqplots below we can see that the converted and demented slopes are roughly normally distributed. The nondemented slopes deviate from normality more, but the n size is high enough that these deviations from normality likely won't matter.
+
+```{r}
+g1 <- ggqqplot(slope.dem$estimate) + ggtitle('qqplot of atrophy rate, demented')
+g2 <- ggqqplot(slope.ndem$estimate) + ggtitle('qqplot of atrophy rate, nondemented')
+g3 <- ggqqplot(slope.conv$estimate) + ggtitle('qqplot of atrophy rate, converted')
+
+grid.arrange(g1, g2, g3, ncol=2)
+```
+
+
+```{r}
+oneway.test(estimate ~ Group,
+            var.equal = FALSE,
+            data=dat.slopes)
+
+# a refresher of Bonferroni's corrected p value for 3 comparisons
+print(0.05/3)
+
+t.test(slope.dem$estimate, slope.ndem$estimate)
+t.test(slope.ndem$estimate, slope.conv$estimate)
+t.test(slope.conv$estimate, slope.dem$estimate)
+```
+
+
+```{r, fig.width=4, fig.height=4}
+dat.slopes$Group <- factor(dat.slopes$Group, levels=c("Nondemented", "Converted", "Demented"))
+ggplot(dat.slopes, aes(x=Group, y=estimate, fill=Group)) +
+  geom_boxplot(alpha=0.2) +
+  ggtitle("Estimated Atrophy Rate by Group")
+```
+
+```{r}
+# let's make a dataframe to build a model on that incorporates our newly calculated 
+# estimated atrophy rate (which was estimated via linear regression)
+# since the estimated atrophy rates were calculated based on the particpants most recent visit,
+# i will train and test the model based only on those data.
+
+# here's the data only for a participant's most recent visit.
+dat.recent <- dat %>% group_by(Subject.ID) %>% top_n(1, Visit)
+
+# merging our recent data frame and slope estimates data frame
+dat.recent.est <- merge(dat.slopes, dat.recent, by='Subject.ID')
+
+# dropping unnecessary columns left over from the regression summary
+to_drop = c("term","std.error", "statistic", "p.value")
+dat.recent.est <- dat.recent.est[, !(names(dat.recent.est) %in% to_drop)]
+head(dat.recent.est)
+```
+
+```{r}
+# dealing with missing data
+dat.missing <- dat.recent.est[!complete.cases(dat.recent.est),]
+dat.complete <- dat.recent.est[complete.cases(dat.recent.est),]
+
+# let's take a look
+(dat.missing)
+
+# since SES is correlated with EDUC we will fill the missing SES value with the median based on EDUC level
+# finding median SES of those with EDUC equal 12 or 16
+SES.educ12 <- median(dat.complete[dat.complete$EDUC == 12,"SES"])
+SES.educ16 <- median(dat.complete[dat.complete$EDUC == 16,"SES"])
+
+# since MMSE is corrolated with CDR, we will fill the missing MMSE value with the median based on CDR score
+# finding median MMSE of those with CDR equal to 1.0
+MMSE.CDR.1 <- median(dat.complete[dat.complete$CDR == 1.0,"MMSE"])
+
+# now filling in val
+dat.missing[dat.missing$EDUC ==12, "SES"] <- SES.educ12
+dat.missing[dat.missing$EDUC ==16, "SES"] <- SES.educ16
+dat.missing[dat.missing$Subject.ID == "OAS2_0181","MMSE"] <- MMSE.CDR.1
+
+(dat.missing)
+
+# stitching our dataframes back together
+dat.recent.est.cleaned <- bind_rows(dat.complete, dat.missing)
+
+# renaming our "estimate" column to "atrophy.rate"
+dat.recent.est.cleaned <- dat.recent.est.cleaned %>% rename(atrophy.rate = estimate)
+
+# if there are no rows with nan in our final cleaned data frame this should return an empty data frame
+# let's check
+dat.recent.est.cleaned[!complete.cases(dat.recent.est.cleaned),]
+head(dat.recent.est.cleaned)
+```
+
+
+```{r, fig.width=6, fig.height=4}
+atrophyrate.Age.lm <- lm(atrophy.rate~Age, data = dat.recent.est.cleaned)
+summary(atrophyrate.Age.lm)
+b <- atrophyrate.Age.lm$coefficients[1]
+m <- atrophyrate.Age.lm$coefficients[2]
+
+ggplot(dat.recent.est.cleaned, aes(x=Age, y=atrophy.rate, color=Group.x)) +
+  geom_point() +
+  geom_abline(slope = m, intercept = b) +
+  ggtitle("Atrophy Rate by Age")
+
+cor.test(dat.recent.est.cleaned$atrophy.rate, dat.recent.est.cleaned$Age, method="pearson")
+
+```
+
+
+# 3. Training Classifiers
+
+Here I plan to use LDA and Random Forest, then compare models. 
+
+```{r}
+set.seed(123456)
+
+# dropping a few more columns that we aren't interested in
+to_drop = c("Subject.ID","MRI.ID", "Group.x","Group.y", "Hand", "Visit", "ASF")
+dat.clas.CDR <- dat.recent.est.cleaned[, !(names(dat.recent.est.cleaned) %in% to_drop)]
+
+# changing CDR to our factor (this is our predicted value)
+# we can then reconstruct Group labels from this
+dat.clas.CDR["CDR"] <-  as.factor(dat.clas.CDR$CDR)
+
+split_i <- sample(2, nrow(dat.clas.CDR),
+                  replace = TRUE,
+                  prob = c(0.7,0.3))
+
+training <- dat.clas.CDR[split_i == 1,]
+testing <- dat.clas.CDR[split_i == 2,]
+
+linear <- lda(CDR ~ ., training)
+(linear)
+ggord(linear, training$CDR, txt=NULL, arrow=NULL)
+ggord(linear, training$CDR)
+
+# how well did the training go?
+p1 <- predict(linear, training)$class
+tab <- table(Predicted = p1, Actual = training$CDR)
+(tab)
+
+# how well did the testing go?
+lin.p2 <- predict(linear, testing)$class
+
+confusionMatrix(data=lin.p2, reference = testing$CDR)
+```
+
+
+```{r, fig.height=4, fig.width=6}
+set.seed(123456)
+split_i <- sample(2, nrow(dat.clas.CDR),
+                  replace = TRUE,
+                  prob = c(0.7,0.3))
+
+training <- dat.clas.CDR[split_i == 1,]
+testing <- dat.clas.CDR[split_i == 2,]
+
+random.forest <- randomForest(formula = CDR ~ ., 
+                              data = training, 
+                              importance=TRUE)
+
+# how well did the training go?
+print(random.forest)
+
+# how well did the testing go?
+rf.p2 <- predict(random.forest, testing)
+tab2 <- table(Predicted = rf.p2, Actual = testing$CDR)
+
+varImpPlot(random.forest, main = "Importance of Variables")
+plot(random.forest, main = "Model Error by Number of Trees")
+legend(x = "right", 
+       legend = colnames(random.forest$err.rate),
+       fill = 1:ncol(random.forest$err.rate))
+
+confusionMatrix(data=rf.p2, reference = testing$CDR)
+```
+
+
+
+Does the model improve if we just try to predict whether participants were demented at all?
+Treat all participants who maintained a CDR of 0 as Nondemented
+Treat all others as Demented (CDR of at least 0.5 by the end of the study)
+
+```{r, fig.height=4, fig.width=6}
+set.seed(123456)
+
+# dropping a few more columns that we aren't interested in
+to_drop = c("Subject.ID","MRI.ID",  "Group.y","Group.x", "Hand", "Visit", "ASF")
+
+dat.clas.grp <- dat.recent.est.cleaned[, !(names(dat.recent.est.cleaned) %in% to_drop)]
+
+# Classifying based on Group Label is the same as treating all 
+# participants who maintained a CDR of 0 as nondemented
+# and all others as demented
+# this means that we can achieve the same model by treating all non zero CDR scores as a single category. 
+
+dat.clas.grp[dat.clas.grp$CDR != 0, "CDR"] <- 1
+dat.clas.grp[dat.clas.grp$CDR == 0, "CDR"] <-2
+dat.clas.grp$CDR <- as.factor(dat.clas.grp$CDR)
+
+split_i <- sample(2, nrow(dat.clas.grp),
+                  replace = TRUE,
+                  prob = c(0.70,0.30))
+
+training <- dat.clas.grp[split_i == 1,]
+testing <- dat.clas.grp[split_i == 2,]
+
+linear <- lda(CDR ~ ., training)
+(linear)
+
+lin.p1 <- predict(linear, training)$class
+
+lin.p2 <- predict(linear, testing)$class
+
+
+LD1_proj <- predict(linear, training)$x
+Group <- training$CDR
+df.LD1 <- data.frame(LD1_proj, Group = as.factor(Group))
+ggplot(data = df.LD1) +
+  geom_density(aes(LD1, fill = Group), alpha = 0.1)
+
+confusionMatrix(data=lin.p1, reference = training$CDR)
+confusionMatrix(data=lin.p2, reference = testing$CDR)
+```
+
+
+```{r, fig.height=4, fig.width=6}
+set.seed(123456)
+random.forest <- randomForest(formula = CDR ~ ., data = training, importance=TRUE)
+print(random.forest)
+
+rf.p2 <- predict(random.forest, testing, type = 'response')
+
+varImpPlot(random.forest, main = "Importance of Variables")
+plot(random.forest, main = "Model Error by Number of Trees")
+legend(x = "right", 
+       legend = c("OOB","Nondemented", "Demented"),
+       fill = 1:ncol(random.forest$err.rate))
+
+
+confusionMatrix(data=rf.p2, reference = testing$CDR)
+```
+
+### Model Evaluation
+
+We prefer the model with the larger area under the receiver operating characteristics curve. For AD diagnosing, higher sensitivity is preferred over accuracy or specificity. Based on the confusion matrices above as well as the AUC plotted below, we prefer the LDA model.
+
+```{r}
+# LDA AUROC
+lda.pred <- predict(linear, testing)
+lda.prediction <- prediction(lda.pred$posterior[,2], testing$CDR) 
+lda.auc <- performance(lda.prediction, measure = "auc")@y.values[[1]]
+print(lda.auc)
+
+lda.perf.plot <- performance(lda.prediction,"tpr","fpr")
+plot(lda.perf.plot, col="red", main="ROC")
+
+# RF AUROC
+rf.pred <- predict(random.forest, type="prob", testing)[,2]
+rf.prediction <- prediction(rf.pred, testing$CDR)
+rf.auc <- performance(rf.prediction, measure = "auc")@y.values[[1]] 
+print(rf.auc)
+
+rf.perf.plot <- performance(rf.prediction, "tpr","fpr")
+plot(rf.perf.plot, add=TRUE)
+
+legend(x = "right", 
+       legend = c("LDA","Random Forest"), fill=c("red", "black"))
+abline(coef = c(0, 1), col="grey")
+```
+
+
+
