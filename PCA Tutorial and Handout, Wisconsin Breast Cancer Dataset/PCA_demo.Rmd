@@ -1,0 +1,197 @@
+---
+title: "Principal Component Analysis Demo"
+author: "Vishesh Saharan, Jonathan Ramos"
+date: "2023-11-04"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2) 
+library(matlib)
+library(factoextra)
+library(tidyverse)
+library(reshape2)
+```
+
+## Wisconsin Diagnostic Breast Cancer (WDBC)
+Features are computed from a digitized image of a fine needle aspirate (FNA) of a breast mass.  They describe characteristics of the cell nuclei present in the image. A few of the images can be found at http://www.cs.wisc.edu/~street/images/
+The labels 'B' and 'M' represent denote whether a sample was benign or malignant respectively. 
+
+One potential question of interest would be "which feature or subset of features contributes most to the variability in this set?" To address this question, we can use principal component analysis to more carefully inspect how each variable contributes to the variance of the data. Answering this question can be a useful step in building models or guiding further research questions to investigate specific properties of benign vs malignant samples. 
+
+
+```{r}
+# load in data
+wdbc <- read.csv('wdbc_data.csv')
+
+# check cols; these data are well suited for PCA because we have many columns of numerical data
+str(wdbc)
+
+
+# let's make some 2D plots with random pairs of features
+# some definitely look better than others, which of these best represents the patterns in our data?
+ggplot(wdbc, aes(x=fractal_dimension_mean, y=texture_mean, color=diagnosis)) + geom_point(alpha=0.6, size=0.8)
+ggplot(wdbc, aes(x=smoothness_se, y=symmetry_mean, color=diagnosis)) + geom_point(alpha=0.6, size=0.8)
+ggplot(wdbc, aes(x=compactness_worst, y=concavity_se, color=diagnosis)) + geom_point(alpha=0.3, size=0.8)
+
+# correlation matrix
+cormat <- round(cor(wdbc[,-2:-1]),2)
+
+melted_cormat <- melt(cormat)
+head(melted_cormat)
+
+ggplot(data = melted_cormat, aes(Var2, Var1, fill = value))+
+ geom_tile(color = "white")+
+ scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+   midpoint = 0, limit = c(-1,1), space = "Lab", 
+   name="Pearson\nCorrelation") +
+  theme_minimal()+ 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1.01, 
+    size = 9.5, hjust = 1))+
+  coord_fixed() +
+  ggtitle('Correlation Heatmap')
+```
+The exploratory 2D scatter plots are only one way of looking at some of the relationships in these data. Since we have 30 features (and we can't make a 30-dimensional plot), it would be extremely tedious to evaluate every possible pairwise combination of features. If we reduce the number of dimensions with PCA we can better visualize patterns of variance in the data. The correlation heat map indicates multicolinearity in this dataset which causes problems in regression. This means that we can apply PCA to generate new orthogonal, uncorrelated features. By using principal components as new features on which to build models, benefits of PCA also include improving model performance, interpretability, and generalizeability. 
+
+## Eigenvalue Decomposition of the Covariance Matrix
+
+The assumption of linearity allows us to frame PCA as a change of basis. In short, PCA boils down to a change of basis from our original feature space into a new orthonormal basis defined by the eigenvectors of the covariance matrix. These eigenvectors that we consider as principal components or PCs, are derived from linear combinations of our original features which point in the direction of maximal variance. We may select a subset of PCs based on their respective eigenvalues to project our original data onto. 
+
+Recall that covariance is a measure which represents the degree to which 2 random variables change together and is given by:
+
+$cov(X,Y)=\frac{\sum_{i=1}^n(X_i-\bar{X})(Y_i-\bar{Y})}{n-1}$
+
+If we consider our data to be an m x n matrix with m measurements and n variables, we may build an n x n matrix where each position i,j represents the covariance between the ith and jth variables from our data. Note that down main diagonal, we have the covariance between a variable and itself, which is equal its variance. For example if we had three variables, or dimensions $x, y and z$, its covariance matrix looks like
+
+$C=\begin{bmatrix} cov(x,x) & cov(x,y) & cov(x,z) \\cov(y,x) & cov(y,y) & cov(y,z)\\cov(z,x) & cov(z,y) & cov(z,z) \\\end{bmatrix}$
+
+Because the covariance matrix is always square, we can compute its eigenvalues and eigenvectors. Eigenvectors have the special property of retaining their direction when a linear transformation is applied to it. Since we are applying this process onto the centered (and often standardized) covariance matrix, we end up with a set of orthogonal vectors in the direction of maximal variance which we can use to form a new basis for our data.
+
+
+## R function: princomp
+
+Our PCs are linear combinations of our original features. We can look at the scalar values in each of these eigenvectors and determine how much each original feature contributes to the PC. These scalars are called loadings and the projected data points are called scores. 
+We can carry out PCA with the built in function princomp(). This function offers an argument called cor to center and standardize the data. Additionally, the argument called scores denotes whether or not to compute coordinates on each PC (the scores). 
+
+
+```{r}
+# removing labels
+wdbc.features <- wdbc[,-2:-1]
+
+# Apply PCA with princomp.
+# args: cor=TRUE to center and standardize data, score=TRUE to compute scores
+pca_result <- princomp(wdbc.features, cor=TRUE, scores=TRUE)
+
+# Summary of the PCA results
+summary <- summary(pca_result)
+(summary)
+
+# visualization of variance explained by PCs
+fviz_eig(pca_result, addlabels = TRUE, xlab = 'Principal Components')
+
+# conversely, we may also plot the cumulative sum of variance explained 
+var_explained <- pca_result$sdev ** 2 / sum(pca_result$sdev**2)
+cum_var_explained <- cumsum(var_explained)
+var_explained_df <- data.frame(PC=1:length(var_explained), cumulative_var_explained=cum_var_explained)
+ggplot(data=var_explained_df, aes(x=PC, y=cumulative_var_explained)) +
+  geom_line(color='darkred') +
+  geom_point(color='darkred') +
+  xlab('Principal Component') +
+  ylab('Cumulative Variance Explained')
+
+# both indicate we can explain over 90% of the variance with 7 PCs.
+```
+The scree plot above plots the percent variance explained of each component in descending order. The percent variance explained is computed by taking the sum of all the eigenvalues and dividing any given eigenvalue by the sum. The key take away is that the first few components explain the majority of the variance in the data while the last components contribute much less. This means that if we set a cut off at 90% variance explained we can select only the first seven PCs and still retain about 91.1% of the variance. 
+
+The cumulative variance explained plot is an alternative visualization of the same data as a scree plot, where each point, n, on the x axis represents the sum of the variance explained by the first n components. Note that this will always max out at 100% by the end of the plot where we consider all 30 PCs. 
+
+Now that we've got our PCs, we can select a subset of them to construct a new basis.
+
+```{r}
+# Extract the PCA scores (coordinates of the data in the PCA space)
+pca_scores <- pca_result$scores[,1:2]
+
+# Create a data frame that includes the PCA scores and the species information
+pca_data <- data.frame(diagnosis = wdbc$diagnosis, pca_scores)
+
+# Use ggplot2 to create a scatter plot of the first two principal components
+# note reflection about y axis because underlying implementation of PCA in prcomp() is SVD based
+ggplot(data = pca_data, aes(x = Comp.1, y = Comp.2, color = diagnosis)) +
+  geom_point(alpha = 0.6, size = 0.8) +
+  ggtitle("PCA of WDBC") +
+  xlab("Principal Component 1") +
+  ylab("Principal Component 2")
+```
+This 2D plot is definitely an improvement from our initial exploratory plots; While PCA does not maximize class separability, PCA allows us to see new patterns in the data the we couldn't visualize very well during the exploratory analyses. 
+
+There are a few important interpretations here:
+The eigenvalues represent the variance explained by its respective eigenvector. If we consider that the orthonormal eigenvector represents the direction of most variance, its eigenvalue represents its scale. Since we know that our PCs are ordered, the first few PCs likely describe the majority of the variance in these data. In this case, the proportion of variance explained by the first two PCs is 0.6324.
+
+Since eigenvectors are orthogonal, they are uncorrelated. This can be useful when we need to eliminate mulitcolinearity between features or engineer new uncorrelated features from the original ones to improve model performance.
+
+## Inspecting scores
+We mentioned previously that each PC is a linear combination of the original features. By inspecting the loadings of each PC more closely we can see what this means in terms of our original features. 
+
+```{r}
+# cor=TRUE to center and standardize data, score=TRUE to compute scores
+pca_result <- princomp(wdbc.features, cor=TRUE, scores=TRUE)
+
+# inspect loading matrix for first 2 PCs
+pca_result$loadings[, 1:2]
+```
+
+Loadings range from (-1,1) and loading with a high absolute value indicates that the variable has a strong influence in that particular component. We can think of the loadings essentially as the weight or contribution of a feature to a given PC. From the loading matrix above, we can see that concavity_mean and concave_points_mean have the highest loadings for PC1 which indicates that the concavity of cell bodies can be an important morphological trait that contributes to the variance of the data. Notably, perimeter_worst and radius_worst have relatively high loadings in both PC1 and PC2. 
+
+## Quality of Representation
+
+From the loadings we can see that not all features influence a given PC equally. Features that have a lot of influence in the PCs have a higher quality of representation. Features that do not influence PCs very much are not well represented by the PCs. The quality of the representation is computed by the squared cosine of the loadings. The squared cosine provides insight into how much of the variance in the feature is explained by that principal component and highlights which features are more influential and which are less relevant. A high squared cosine value indicates that a variable contributes significantly to the variance explained by the principal component, while a low value suggests that the variable has less influence on that component. This information can guide feature selection or further data analysis, as it allows us to focus on the most informative variables or components. 
+
+Plotting note:
+Biplots are useful for showing which features are correlated and which are not: features that are well correlated will cluster together on the biplot whereas features that re not correlated will be farther away (opposite) from each other. Further, features that contribute more to the variation in a PC will be represented by longer vectors that approach the edge of the circle while features that do not contribute very much will lie closer to the center of the circle. 
+
+```{r}
+# plot squared cosine across loadings for first PC
+fviz_cos2(pca_result, choice = "var", axes = 1)
+
+# plot squared cosine across loadings for second PC
+fviz_cos2(pca_result, choice = "var", axes = 2)
+
+# plot squared cosine across loadings for both PCs
+fviz_cos2(pca_result, choice = "var", axes = 1:2)
+
+# biplot color coded by squared cosine
+fviz_pca_var(pca_result, col.var = "cos2",
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07")
+             )
+```
+
+
+## Contribution
+
+We can also express the squared cosine as a percent of the overall variance explained by that particular PC. In this way, contribution is given by (var.cos2 * 100) / (total cos2 of the component) and essentially represents a re-scaling of cosine squared as a percent. We can reproduce the squared cosine plots above in terms of contribution.
+
+```{r}
+# plot contribution across loadings for first PC
+fviz_contrib(pca_result, choice = "var", axes = 1)
+
+# plot contribution across loadings for second PC
+fviz_contrib(pca_result, choice = "var", axes = 2)
+
+# plot contribution across loadings for both PCs
+fviz_contrib(pca_result, choice = "var", axes = 1:2)
+
+# biplot color coded by contribution
+fviz_pca_var(pca_result, col.var = "contrib",
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07")
+             )
+```
+
+## Conclusion
+
+Overall variations of perimeter, radius and area all contribute heavily to the the variation of data over the first 2 PCs. Concavity metrics also ranked highly in this regard. From the data description, the label 'worst' just refers to the largest measurement in a given image, so the columns called worst perimeter or the worst radius contain the maximum measurement for those images. This means that we may conclude that most of the variance in this data is captured by measurements of perimeter, which implies malignant cells probably appear larger and more irregular in shape than benign cells. Further statistical analyses would be needed to confirm whether or not benign cells differ from malignant cells in this way, but PCA has given us some insight into what features play a larger role in the variance in this dataset. 
+
+In this set, the issue of mulitcolinearity also arises because many of the columns in this set describe the same thing and are well correlated (perimeter, area, and radius are all a measure of size in terms of radius). If we were training models on the original features of this data it would be best to just pick one of these. This application of PCA also helped us build new uncorrelated features which we could use to train multiple regression models. From the cumulative variance explained, the first 7 PCs describe over 90% of the variance explained and would be a fair cut off.
+
+
+
